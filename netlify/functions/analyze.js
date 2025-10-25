@@ -1,23 +1,47 @@
-// netlify/functions/analyze.js
-// ✅ version CommonJS compatible Netlify Functions (Node 18)
+// ✅ Fichier complet : netlify/functions/analyze.js
+// Compatible Node.js (CommonJS) et Extension Chrome
+// Inclut la gestion CORS complète + réponse JSON simulée IA
 
-const fetch = require("node-fetch"); // require au lieu de import
+const fetch = require("node-fetch");
 
+// Headers CORS — obligatoires pour que Chrome accepte la requête
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Methods": "OPTIONS, POST",
+  "Content-Type": "application/json"
+};
+
+// Fonction principale
 exports.handler = async (event) => {
+  // 🔹 Étape 1 : Gérer les requêtes prévol CORS (OPTIONS)
+  if (event.httpMethod === "OPTIONS") {
+    return {
+      statusCode: 200,
+      headers: corsHeaders,
+      body: "OK"
+    };
+  }
+
   try {
+    // 🔹 Étape 2 : Lire le corps de la requête JSON
     const body = JSON.parse(event.body || "{}");
     const adData = body.data;
 
+    // Vérification basique : y a-t-il des données ?
     if (!adData || !adData.title) {
       return {
         statusCode: 400,
-        headers: { "Access-Control-Allow-Origin": "*" },
-        body: JSON.stringify({ success: false, error: "Aucune donnée reçue" })
+        headers: corsHeaders,
+        body: JSON.stringify({
+          success: false,
+          error: "Aucune donnée reçue"
+        })
       };
     }
 
-    // 🧪 Simulation de réponse IA (pour test local / extension)
-    // → remplace plus tard par ton appel Claude
+    // 🔹 Étape 3 : Simulation d’une réponse IA (Claude)
+    // (Remplacera plus tard par un appel réel à l'API Claude)
     const fake = {
       overall_score: 82,
       risk_level: "medium",
@@ -40,23 +64,26 @@ exports.handler = async (event) => {
       decision: "PRUDENCE"
     };
 
+    // 🔹 Étape 4 : Réponse JSON OK
     return {
       statusCode: 200,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type",
-        "Access-Control-Allow-Methods": "OPTIONS, POST",
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ success: true, data: fake })
+      headers: corsHeaders,
+      body: JSON.stringify({
+        success: true,
+        data: fake
+      })
     };
 
   } catch (err) {
-    console.error("Erreur analyze:", err);
+    // 🔹 Étape 5 : Gestion d’erreurs
+    console.error("❌ Erreur analyze.js:", err);
     return {
       statusCode: 500,
-      headers: { "Access-Control-Allow-Origin": "*" },
-      body: JSON.stringify({ success: false, error: "Erreur interne serveur" })
+      headers: corsHeaders,
+      body: JSON.stringify({
+        success: false,
+        error: "Erreur interne serveur"
+      })
     };
   }
 };
