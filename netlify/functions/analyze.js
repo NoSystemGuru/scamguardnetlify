@@ -1,3 +1,6 @@
+// netlify/functions/analyze.js
+// Appel 1x Claude pour produire TOUTES les jauges + explications
+// Nécessite: env CLAUDE_API_KEY
 import fetch from "node-fetch";
 
 const headers = {
@@ -6,16 +9,21 @@ const headers = {
   "Access-Control-Allow-Methods": "OPTIONS, POST",
 };
 
-const simpleScore = (a) => {
-  let score = 50;
-  if (a.price) score += 5;
-  if ((a.description || "").length > 120) score += 10;
-  if ((a.description || "").toLowerCase().includes("western union")) score -= 30;
-  if ((a.description || "").toLowerCase().includes("crypto")) score -= 20;
-  if (a.location && !/non précisée/i.test(a.location)) score += 5;
-  if (a.image) score += 5;
-  return Math.max(5, Math.min(95, score));
-};
+const MODEL = "claude-3-5-sonnet-20240620"; // ou "claude-3-haiku-20240307" si budget serré
+
+// Extraction JSON sûre depuis une réponse texte
+function safeParseJSON(text) {
+  try { return JSON.parse(text); } catch {}
+  // tente de récupérer un bloc ```json ... ```
+  const m = text.match(/```json\s*([\s\S]*?)```/i) || text.match(/```([\s\S]*?)```/);
+  if (m) { try { return JSON.parse(m[1]); } catch {} }
+  // tente de découper du premier { au dernier }
+  const start = text.indexOf("{"), end = text.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    try { return JSON.parse(text.slice(start, end + 1)); } catch {}
+  }
+  return null;
+}
 
 export const handler = async (event) => {
   if (event.httpMethod === "OPTIONS") {
@@ -24,87 +32,96 @@ export const handler = async (event) => {
 
   try {
     const body = JSON.parse(event.body || "{}");
-    const annonce = body.data || {};
-
-    if (!annonce || !annonce.title) {
+    const a = body.data || {};
+    if (!a || !a.title) {
       return { statusCode: 400, headers, body: JSON.stringify({ success: false, error: "Aucune donnée reçue" }) };
     }
-
-    const apiKey = process.env.CLAUDE_API_KEY;
-
-    // Si pas de clé Claude -> scoring simple
-    if (!apiKey) {
-      const score = simpleScore(annonce);
-      const risk_level = score >= 75 ? "low" : score >= 50 ? "medium" : "high";
-      const data = {
-        title: annonce.title,
-        overall_score: score,
-        risk_level,
-        red_flags: score < 60 ? ["Description courte ou imprécise", "Demander une remise en main propre"] : [],
-        green_flags: score >= 60 ? ["Prix/description cohérents", "Localisation présente"] : [],
-        recommendation:
-          risk_level === "low"
-            ? "Annonce plutôt fiable. Restez vigilant et privilégiez une remise en main propre."
-            : risk_level === "medium"
-            ? "Risque modéré. Demandez plus d’infos et vérifiez le produit en personne."
-            : "Risque élevé. Évitez les paiements à distance et signalez l’annonce si nécessaire.",
-        image_url: annonce.image || "",
-        price: annonce.price || "",
-        location: annonce.location || "",
-      };
-      return { statusCode: 200, headers, body: JSON.stringify({ success: true, data }) };
+    if (!process.env.CLAUDE_API_KEY) {
+      return { statusCode: 500, headers, body: JSON.stringify({ success: false, error: "CLAUDE_API_KEY manquante" }) };
     }
 
-    // Appel Claude (si clé dispo)
-    const prompt = `
-Analyse l'annonce ci-dessous et renvoie STRICTEMENT un JSON:
-{
-  "title": "...",
-  "overall_score": number 0-100,
-  "risk_level": "low"|"medium"|"high",
-  "red_flags": [string],
-  "green_flags": [string],
-  "recommendation": "..."
-}
-Annonce:
-Titre: ${annonce.title}
-Prix: ${annonce.price}
-Description: ${annonce.description}
-Localisation: ${annonce.location}
-    `.trim();
+    // Contexte compact et structuré envoyé à l’IA
+    const payload = {
+      title: a.title || "",
+      price: a.price || "",
+      location: a.location || "",
+      description: (a.description || "").slice(0, 4000), // limite sécurité
+      url: a.url || "",
+      seller: {
+        rating: a.seller?.rating ?? null,
+        sinceMonths: a.seller?.sinceMonths ?? null,
+        positive: a.seller?.positive ?? null,
+        totalReviews: a.seller?.totalReviews ?? null,
+        itemsCount: a.seller?.itemsCount ?? null,
+      },
+      images: (a.images || []).slice(0, 10).map(x => ({ src: x.src, w: x.w || null, h: x.h || null }))
+    };
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+    const schema = {
+      type: "object",
+      required: ["overall_score", "risk_level", "criteria", "red_flags", "green_flags", "recommendation", "decision"],
+      properties: {
+        overall_score: { type: "number", minimum: 0, maximum: 100 },
+        risk_level: { type: "string", enum: ["low", "medium", "high"] },
+        decision: { type: "string", enum: ["GO", "PRUDENCE", "NO_GO"] },
+        criteria: {
+          type: "object",
+          required: [
+            "seller_rating","account_age_months","positive_reviews",
+            "writing_quality","photo_authenticity","price_fairness",
+            "payment_safety","items_count","location_precision"
+          ],
+          properties: {
+            seller_rating:      { type: "number", minimum:0, maximum:100, description:"Note vendeur" },
+            account_age_months: { type: "number", minimum:0, maximum:100, description:"Ancienneté" },
+            positive_reviews:   { type: "number", minimum:0, maximum:100 },
+            writing_quality:    { type: "number", minimum:0, maximum:100 },
+            photo_authenticity: { type: "number", minimum:0, maximum:100 },
+            price_fairness:     { type: "number", minimum:0, maximum:100 },
+            payment_safety:     { type: "number", minimum:0, maximum:100 },
+            items_count:        { type: "number", minimum:0, maximum:100 },
+            location_precision: { type: "number", minimum:0, maximum:100 }
+          }
+        },
+        explanations: {
+          type: "object",
+          additionalProperties: { type: "string" }
+        },
+        red_flags:   { type: "array", items: { type: "string" } },
+        green_flags: { type: "array", items: { type: "string" } },
+        recommendation: { type: "string" }
+      }
+    };
+
+    const prompt = `
+Tu es un auditeur d'annonces Leboncoin. À partir UNIQUEMENT des données fournies, produis un JSON STRICT qui suit ce schéma :
+
+${JSON.stringify(schema, null, 2)}
+
+Règles :
+- Les 9 critères de "criteria" sont des POURCENTAGES (0–100). Ne mets pas de texte, seulement des nombres.
+- "overall_score" est un pourcentage 0–100 calculé de façon cohérente à partir des critères (pondérations libres mais raisonnables).
+- "risk_level": "low" | "medium" | "high".
+- "decision": "GO" | "PRUDENCE" | "NO_GO".
+- "explanations" contient 1–2 phrases courtes par critère (clef = nom du critère).
+- "red_flags" et "green_flags" sont des puces courtes, factuelles, justifiées par les données.
+- Si une info est absente, ne l'invente pas : baisse le score de confiance correspondant et explique-le.
+- NE RENVOIE QUE LE JSON, sans préface ni commentaire.
+
+Données:
+${JSON.stringify(payload, null, 2)}
+`.trim();
+
+    // --------- Appel Claude ----------
+    const claude = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
+        "content-type": "application/json",
+        "x-api-key": process.env.CLAUDE_API_KEY,
         "anthropic-version": "2023-06-01"
       },
       body: JSON.stringify({
-        model: "claude-3-haiku-20240307",
-        max_tokens: 500,
-        messages: [{ role: "user", content: prompt }]
-      })
-    });
-
-    const ai = await response.json();
-    const text = ai?.content?.[0]?.text || "{}";
-    let parsed;
-    try { parsed = JSON.parse(text); } catch { parsed = {}; }
-
-    // Si Claude ne renvoie pas de score -> fallback
-    if (typeof parsed.overall_score !== "number") {
-      parsed.overall_score = simpleScore(annonce);
-      parsed.risk_level = parsed.overall_score >= 75 ? "low" : parsed.overall_score >= 50 ? "medium" : "high";
-    }
-    parsed.title ||= annonce.title;
-    parsed.price ||= annonce.price;
-    parsed.location ||= annonce.location;
-    parsed.image_url ||= annonce.image;
-
-    return { statusCode: 200, headers, body: JSON.stringify({ success: true, data: parsed }) };
-  } catch (err) {
-    console.error("❌ analyze error:", err);
-    return { statusCode: 500, headers, body: JSON.stringify({ success: false, error: err.message }) };
-  }
-};
+        model: MODEL,
+        max_tokens: 1000,
+        temperature: 0.2,
+        messages: [{ role]()
