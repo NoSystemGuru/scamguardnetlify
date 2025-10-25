@@ -2,6 +2,13 @@
   "name": "scamguard",
   "version": "1.0.0",
   "description": "Détecteur d'arnaques Leboncoin par IA",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["scamguard", "leboncoin", "detector"],
+  "author": "ScamGuard",
+  "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.0",
     "axios": "^1.7.0",
