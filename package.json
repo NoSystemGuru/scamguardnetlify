@@ -1,9 +1,10 @@
 {
-  "name": "scamguard-netlify",
+  "name": "scamguard",
   "version": "1.0.0",
+  "description": "Détecteur d'arnaques Leboncoin par IA",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.0",
     "axios": "^1.7.0",
-    "cheerio": "^1.0.0",
-    "openai": "^4.62.0"
+    "cheerio": "^1.0.0"
   }
 }
