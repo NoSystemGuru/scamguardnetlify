@@ -1,0 +1,9 @@
+{
+  "name": "scamguard-netlify",
+  "version": "1.0.0",
+  "dependencies": {
+    "axios": "^1.7.0",
+    "cheerio": "^1.0.0",
+    "openai": "^4.62.0"
+  }
+}
