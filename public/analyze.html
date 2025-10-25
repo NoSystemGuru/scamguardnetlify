@@ -25,26 +25,28 @@
     </div>
 
     <div id="error" class="hidden bg-red-50 text-red-700 border border-red-200 rounded-xl p-4 mb-6"></div>
-
     <div id="results" class="hidden space-y-8"></div>
   </div>
 
   <script>
-    // Décodage des données depuis l’URL (base64)
+    console.log("🚀 Page analyze.html chargée");
+
     function decodeData(b64) {
       try {
         const json = decodeURIComponent(escape(atob(b64)));
         return JSON.parse(json);
       } catch (e) {
-        console.error("Erreur de décodage:", e);
+        console.error("Erreur de décodage Base64:", e);
         return null;
       }
     }
 
-    // Charger les données depuis l’URL
     const params = new URLSearchParams(window.location.search);
     const dataParam = params.get("d");
     const annonceData = dataParam ? decodeData(dataParam) : null;
+    console.log("📦 Données reçues:", annonceData);
+
+    const API_URL = "https://scamguard-netlify.netlify.app/.netlify/functions/analyze";
 
     const loadingEl = document.getElementById("loading");
     const progressBar = document.getElementById("progress-bar");
@@ -52,62 +54,95 @@
     const resultsEl = document.getElementById("results");
 
     async function startAnalysis() {
-      if (!annonceData) {
-        errorEl.textContent = "Aucune donnée reçue depuis l’extension.";
+      if (!annonceData || !annonceData.title) {
+        errorEl.textContent = "❌ Aucune donnée reçue. Rechargez la page Leboncoin.";
         errorEl.classList.remove("hidden");
         return;
       }
 
       loadingEl.classList.remove("hidden");
-      progressBar.style.width = "20%";
+      progressBar.style.width = "30%";
 
       try {
-        const API_URL = "https://scamguardnetlify.netlify.app/.netlify/functions/analyze";
+        console.log("📡 Envoi des données vers API:", API_URL);
         const response = await fetch(API_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ data: annonceData })
+          body: JSON.stringify({ data: annonceData }),
         });
 
         progressBar.style.width = "60%";
+        console.log("📨 Statut réponse:", response.status);
 
-        if (!response.ok) {
-          throw new Error(`Erreur HTTP ${response.status}`);
+        const resultText = await response.text();
+        console.log("🧾 Réponse brute:", resultText);
+
+        let result;
+        try {
+          result = JSON.parse(resultText);
+        } catch (e) {
+          throw new Error("Réponse API invalide (non-JSON)");
         }
 
-        const result = await response.json();
         progressBar.style.width = "100%";
         loadingEl.classList.add("hidden");
 
         if (!result.success) {
-          throw new Error(result.error || "Erreur inconnue");
+          throw new Error(result.error || "Erreur API");
         }
 
-        const d = result.data;
-        showResults(d);
+        showResults(result.data);
       } catch (err) {
         loadingEl.classList.add("hidden");
         errorEl.textContent = "❌ " + err.message;
         errorEl.classList.remove("hidden");
+        console.error("Erreur pendant analyse:", err);
       }
     }
 
     function showResults(d) {
+      console.log("🎯 Résultats reçus:", d);
       resultsEl.innerHTML = `
         <div class="bg-white p-6 rounded-2xl shadow-lg border-2 border-orange-200">
-          <h2 class="text-2xl font-bold mb-4 flex items-center gap-2">📊 Résultat de l'analyse</h2>
-          <div class="flex gap-6 items-start">
-            <img src="${d.image_url || annonceData.image}" class="w-40 h-40 object-cover rounded-xl shadow-md border" />
-            <div>
-              <h3 class="text-2xl font-bold mb-2">${d.title || annonceData.title}</h3>
-              <p class="text-2xl font-black text-orange-600 mb-2">${d.price || annonceData.price}</p>
-              <p class="text-gray-600">${d.location || annonceData.location}</p>
-            </div>
-          </div>
+          <h2 class="text-2xl font-bold mb-4">📊 Résultat de l'analyse</h2>
+          <h3 class="text-2xl font-black text-orange-600 mb-2">${d.title || annonceData.title}</h3>
+          <p class="text-gray-700 mb-4">Score global : <strong>${d.overall_score || "?"}/100</strong></p>
+          <p class="text-lg font-medium ${
+            d.risk_level === "high"
+              ? "text-red-600"
+              : d.risk_level === "medium"
+              ? "text-orange-500"
+              : "text-green-600"
+          }">
+            ${
+              d.risk_level === "high"
+                ? "🚨 Risque élevé"
+                : d.risk_level === "medium"
+                ? "⚠️ Risque modéré"
+                : "✅ Faible risque"
+            }
+          </p>
+          <p class="mt-3 text-gray-600">${d.recommendation || "Analyse terminée."}</p>
         </div>
 
-        <div class="text-center mt-8">
-          <h2 class="text-5xl font-black mb-3 ${
-            d.risk_level === 'high' ? 'text-red-600' : d.risk_level === 'medium' ? 'text-orange-500' : 'text-green-600'
-          }">
-            ${d.risk_level === 'high' ? '🚨 DANGER' : d.risk_lev
+        <div class="bg-red-50 rounded-2xl p-6 border-2 border-red-200 shadow-lg mt-6">
+          <h3 class="text-xl font-bold mb-3 text-red-800">🚩 Points d'attention</h3>
+          <ul class="list-disc ml-6 text-red-700">
+            ${(d.red_flags || []).map(f => `<li>${f}</li>`).join("")}
+          </ul>
+        </div>
+
+        <div class="bg-green-50 rounded-2xl p-6 border-2 border-green-200 shadow-lg mt-6">
+          <h3 class="text-xl font-bold mb-3 text-green-800">✅ Points positifs</h3>
+          <ul class="list-disc ml-6 text-green-700">
+            ${(d.green_flags || []).map(f => `<li>${f}</li>`).join("")}
+          </ul>
+        </div>
+      `;
+      resultsEl.classList.remove("hidden");
+    }
+
+    startAnalysis();
+  </script>
+</body>
+</html>
