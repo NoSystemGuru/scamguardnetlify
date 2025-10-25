@@ -1,121 +1,63 @@
 // netlify/functions/analyze.js
-// CommonJS + CORS + appel Claude + normalisation anti-NaN
+// OpenAI Structured Outputs (JSON Schema strict) + CORS — 100% IA, sans fallback
 
 const fetch = require("node-fetch");
 
-const corsHeaders = {
+const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
   "Access-Control-Allow-Methods": "OPTIONS, POST",
   "Content-Type": "application/json"
 };
 
-// ---------- Helpers de normalisation ----------
-function toPct(v, d = 0) {
-  const n = typeof v === "string" ? v.replace(/[^\d.]/g, "") : v;
-  const x = Number(n);
-  if (!Number.isFinite(x)) return d;
-  return Math.max(0, Math.min(100, Math.round(x)));
-}
-
-function normCriteria(c = {}) {
-  return {
-    seller_rating:      toPct(c.seller_rating      ?? c.vendor_rating        ?? c.rating),
-    account_age_months: toPct(c.account_age_months ?? c.account_age          ?? c.seller_age),
-    positive_reviews:   toPct(c.positive_reviews   ?? c.reviews_positive     ?? c.positive_feedback),
-    writing_quality:    toPct(c.writing_quality    ?? c.description_quality  ?? c.text_quality),
-    photo_authenticity: toPct(c.photo_authenticity ?? c.photos_authenticity  ?? c.photos_quality),
-    price_fairness:     toPct(c.price_fairness     ?? c.market_price_fairness?? c.price_coherence),
-    payment_safety:     toPct(c.payment_safety     ?? c.payment_security),
-    items_count:        toPct(c.items_count        ?? c.seller_items         ?? c.number_of_listings),
-    location_precision: toPct(c.location_precision ?? c.location_detail      ?? c.location_quality)
-  };
-}
-
-function normalizeAI(ai) {
-  let text = ai?.content?.[0]?.text || "";
-  const fence = text.match(/```json\s*([\s\S]*?)```/i) || text.match(/```([\s\S]*?)```/);
-  if (fence) text = fence[1];
-
-  let raw = {};
-  try { raw = JSON.parse(text); } catch { raw = {}; }
-
-  const criteria = normCriteria(raw.criteria || {});
-  const risk = (raw.risk_level || "medium").toLowerCase();
-  const decisionRaw = (raw.decision || "").toUpperCase();
-  const decision = ["GO", "PRUDENCE", "NO_GO"].includes(decisionRaw)
-    ? decisionRaw
-    : (risk === "low" ? "GO" : risk === "medium" ? "PRUDENCE" : "NO_GO");
-
-  const overall = toPct(
-    raw.overall_score,
-    Math.round(
-      0.18*criteria.seller_rating +
-      0.12*criteria.account_age_months +
-      0.10*criteria.positive_reviews +
-      0.12*criteria.writing_quality +
-      0.11*criteria.photo_authenticity +
-      0.12*criteria.price_fairness +
-      0.12*criteria.payment_safety +
-      0.06*criteria.items_count +
-      0.07*criteria.location_precision
-    )
-  );
-
-  return {
-    overall_score: overall,
-    risk_level: ["low","medium","high"].includes(risk) ? risk : "medium",
-    decision,
-    criteria,
-    explanations: typeof raw.explanations === "object" ? raw.explanations : {},
-    red_flags: Array.isArray(raw.red_flags) ? raw.red_flags.map(String) : [],
-    green_flags: Array.isArray(raw.green_flags) ? raw.green_flags.map(String) : [],
-    recommendation: raw.recommendation || "Analyse complétée."
-  };
-}
-
-// ---------- Handler Netlify ----------
-exports.handler = async (event) => {
-  if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 200, headers: corsHeaders, body: "OK" };
-  }
-
-  try {
-    const body = JSON.parse(event.body || "{}");
-    const ad = body.data;
-
-    if (!ad || !ad.title) {
-      return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ success:false, error:"Aucune donnée reçue" }) };
-    }
-    if (!process.env.CLAUDE_API_KEY) {
-      return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ success:false, error:"CLAUDE_API_KEY manquante" }) };
-    }
-
-    // ---------- PROMPT : tes règles ----------
-    const prompt = `
-Tu es un détecteur d'arnaques spécialisé Leboncoin.
-Analyse l'annonce ci-dessous et renvoie UNIQUEMENT un JSON respectant ce SCHÉMA :
-
-{
-  "overall_score": 0-100,
-  "risk_level": "low" | "medium" | "high",
-  "decision": "GO" | "PRUDENCE" | "NO_GO",
-  "criteria": {
-    "seller_rating": 0-100,
-    "account_age_months": 0-100,
-    "positive_reviews": 0-100,
-    "writing_quality": 0-100,
-    "photo_authenticity": 0-100,
-    "price_fairness": 0-100,
-    "payment_safety": 0-100,
-    "items_count": 0-100,
-    "location_precision": 0-100
+// -------- Schéma JSON strict attendu par l'UI --------
+const schema = {
+  name: "ScamGuardSchema",
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      overall_score: { type: "number", minimum: 0, maximum: 100 },
+      risk_level:    { type: "string", enum: ["low", "medium", "high"] },
+      decision:      { type: "string", enum: ["GO", "PRUDENCE", "NO_GO"] },
+      criteria: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          seller_rating:      { type: "number", minimum: 0, maximum: 100 },
+          account_age_months: { type: "number", minimum: 0, maximum: 100 },
+          positive_reviews:   { type: "number", minimum: 0, maximum: 100 },
+          writing_quality:    { type: "number", minimum: 0, maximum: 100 },
+          photo_authenticity: { type: "number", minimum: 0, maximum: 100 },
+          price_fairness:     { type: "number", minimum: 0, maximum: 100 },
+          payment_safety:     { type: "number", minimum: 0, maximum: 100 },
+          items_count:        { type: "number", minimum: 0, maximum: 100 },
+          location_precision: { type: "number", minimum: 0, maximum: 100 }
+        },
+        required: [
+          "seller_rating","account_age_months","positive_reviews","writing_quality",
+          "photo_authenticity","price_fairness","payment_safety","items_count","location_precision"
+        ]
+      },
+      explanations: { type: "object", additionalProperties: { type: "string" } },
+      red_flags:    { type: "array", items: { type: "string" } },
+      green_flags:  { type: "array", items: { type: "string" } },
+      recommendation: { type: "string" }
+    },
+    required: [
+      "overall_score","risk_level","decision","criteria",
+      "explanations","red_flags","green_flags","recommendation"
+    ]
   },
-  "explanations": { "<critère>": "phrase courte" },
-  "red_flags": [string],
-  "green_flags": [string],
-  "recommendation": string
-}
+  strict: true
+};
+
+// -------- Prompt avec tes règles EXACTES --------
+function buildPrompt(ad) {
+  return `
+Tu es un auditeur d'annonces Leboncoin.
+Analyse l'annonce et produis STRICTEMENT un objet conforme au JSON Schema fourni par le serveur.
+Ne renvoie AUCUN texte hors JSON (le serveur impose un schema strict).
 
 Données:
 ${JSON.stringify({
@@ -132,7 +74,7 @@ ${JSON.stringify({
   images: (ad.images || []).slice(0, 10)
 }, null, 2)}
 
-RÈGLES (0–100 %) :
+RÈGLES (notes 0–100 à appliquer à la lettre) :
 
 1) Ancienneté du compte (account_age_months)
 - 100 si > 24 mois ; 80 si 12–24 ; 60 si 6–12 ; 30 si < 6 ; 0 si inconnu.
@@ -160,41 +102,101 @@ RÈGLES (0–100 %) :
 - 10 si chèque
 
 8) Nb annonces vendeur (items_count)
-- 100 si 1–10 ; 80 si 10–50 ; 30 si 3–5 (prudence) ; 10 si >3 (suspect) ; 0 si 0.
-(En cas de conflit, applique la règle la plus défavorable.)
+- 100 si 1–10 ; 80 si 10–50 ; 30 si 3–5 ; 10 si >3 ; 0 si 0.
+(En cas de conflit de règles, prends la plus défavorable.)
 
 9) Localisation (location_precision)
 - 100 ville+quartier/code postal ; 60 région vague ; 20 non précisée.
 
-EXIGENCES :
-- NOMBRES purs (pas "80%").
-- Respect strict des clés du schéma.
-- overall_score cohérent avec les critères.
-- risk_level + decision en conséquence.
-`.trim();
+Calcule "overall_score" en cohérence avec ces critères.
+Choisis "risk_level" (low/medium/high) et "decision" (GO/PRUDENCE/NO_GO) en conséquence.
+  `.trim();
+}
 
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
+// -------- Extraction “structured outputs” OpenAI --------
+function extractOpenAIJSON(respJson) {
+  // Responses API : chercher un item content contenant du JSON
+  // Cas 1: content[0].type === "output_text" -> text JSON
+  // Cas 2: content[0].type === "json_schema" -> content[0].json
+  const out = respJson?.output || respJson?.response || [];
+  const first = Array.isArray(out) ? out[0] : null;
+  const content = first?.content || [];
+
+  for (const c of content) {
+    if (c.type === "json") return c.json;
+    if (c.type === "output_text" && typeof c.text === "string") {
+      try { return JSON.parse(c.text); } catch {}
+    }
+    if (c.type === "json_schema" && c.json) return c.json;
+    if (typeof c.text === "string") {
+      try { return JSON.parse(c.text); } catch {}
+    }
+  }
+  // fallback conservateur : essaie au plus haut niveau
+  if (typeof respJson === "object") {
+    const txt = respJson?.output_text || respJson?.content || null;
+    if (typeof txt === "string") { try { return JSON.parse(txt); } catch {} }
+  }
+  throw new Error("Réponse OpenAI non parsable (JSON absent).");
+}
+
+exports.handler = async (event) => {
+  if (event.httpMethod === "OPTIONS") {
+    return { statusCode: 200, headers: cors, body: "OK" };
+  }
+
+  try {
+    const body = JSON.parse(event.body || "{}");
+    const ad = body.data;
+    if (!ad || !ad.title) {
+      return { statusCode: 400, headers: cors, body: JSON.stringify({ success:false, error:"Aucune donnée reçue" }) };
+    }
+
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    if (!OPENAI_API_KEY) {
+      return { statusCode: 500, headers: cors, body: JSON.stringify({ success:false, error:"OPENAI_API_KEY manquante" }) };
+    }
+
+    const prompt = buildPrompt(ad);
+
+    // 👉 Responses API + Structured Outputs (JSON Schema strict)
+    const res = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.CLAUDE_API_KEY,
-        "anthropic-version": "2023-06-01"
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: "claude-3-5-sonnet-20240620",
-        max_tokens: 1100,
+        model: "gpt-4o-mini-2024-07-18", // bon rapport qualité/prix
         temperature: 0.2,
-        messages: [{ role: "user", content: prompt }]
+        max_output_tokens: 900,
+        response_format: {
+          type: "json_schema",
+          json_schema: schema,
+          strict: true
+        },
+        input: prompt
       })
     });
 
-    const ai = await res.json();
-    const data = normalizeAI(ai);
+    const j = await res.json();
+    if (!res.ok) {
+      // remonte l’erreur OpenAI pour debug
+      return { statusCode: 502, headers: cors, body: JSON.stringify({ success:false, error: j?.error?.message || "Erreur OpenAI" }) };
+    }
 
-    return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ success: true, data }) };
+    const data = extractOpenAIJSON(j);
 
+    // Re-sécurité légère: clamp des plages 0..100
+    const clamp = (x) => Math.max(0, Math.min(100, Math.round(Number(x)||0)));
+    if (data && data.criteria) {
+      for (const k of Object.keys(data.criteria)) data.criteria[k] = clamp(data.criteria[k]);
+    }
+    data.overall_score = clamp(data.overall_score);
+
+    return { statusCode: 200, headers: cors, body: JSON.stringify({ success:true, data }) };
   } catch (err) {
-    console.error("❌ analyze error:", err);
-    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ success: false, error: err.message }) };
+    console.error("❌ analyze (OpenAI) error:", err);
+    return { statusCode: 500, headers: cors, body: JSON.stringify({ success:false, error: err.message }) };
   }
 };
